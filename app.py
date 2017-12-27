@@ -10,7 +10,7 @@ import traceback
 import re
 import sys
 import csv
-import error
+from zmapi.codes import error
 import aiohttp
 import aiopusher
 from asyncio import ensure_future as create_task
