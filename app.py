@@ -17,6 +17,7 @@ from asyncio import ensure_future as create_task
 from inspect import isfunction
 from pprint import pprint, pformat
 from time import time, gmtime
+from datetime import datetime
 
 ################################## CONSTANTS ##################################
 
@@ -26,6 +27,8 @@ CAPABILITIES = sorted([
     "SUBSCRIBE",
 ])
 
+MODULE_NAME = "bitstamp-md"
+
 ################################ GLOBAL STATE #################################
 
 class GlobalState:
@@ -33,6 +36,8 @@ class GlobalState:
 g = GlobalState()
 g.loop = asyncio.get_event_loop()
 g.ctx = zmq.asyncio.Context()
+g.startup_time = datetime.utcnow()
+g.status = "ok"
 
 # placeholder for Logger
 L = None
@@ -183,7 +188,12 @@ class Controller(ControllerBase):
 
     @ControllerBase.handler()
     async def get_status(self, ident, msg):
-        return [{"name": "bitstamp-md"}]
+        status = {
+            "name": MODULE_NAME,
+            "status": g.status,
+            "uptime": (datetime.utcnow() - g.startup_time).total_seconds(),
+        }
+        return [status]
 
     @ControllerBase.handler()
     async def list_directory(self, ident, msg):
