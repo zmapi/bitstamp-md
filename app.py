@@ -190,6 +190,7 @@ class Controller(ControllerBase):
     async def get_status(self, ident, msg):
         status = {
             "name": MODULE_NAME,
+            "connector_name": "bitstamp",
             "status": g.status,
             "uptime": (datetime.utcnow() - g.startup_time).total_seconds(),
         }
