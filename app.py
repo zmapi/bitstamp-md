@@ -25,7 +25,15 @@ CAPABILITIES = sorted([
     "GET_SNAPSHOT",
     "GET_TICKER_INFO_PRICE_TICK_SIZE",
     "SUBSCRIBE",
+    "LIST_DIRECTORY",
 ])
+
+TICKER_FIELDS = [
+    {"field": "symbol",
+     "type": "str",
+     "label": "Symbol",
+     "description": "The symbol of the ticker"}
+]
 
 MODULE_NAME = "bitstamp-md"
 
@@ -201,9 +209,9 @@ class Controller(ControllerBase):
         url = "https://www.bitstamp.net/api/v2/trading-pairs-info/"
         data = await self._fetch_cached(url)
         data = json.loads(data.decode())
-        res = [x["url_symbol"].upper() for x in data]
+        res = [x["url_symbol"] for x in data]
         res = sorted(res)
-        res = [dict(name=x, dir=False) for x in res]
+        res = [dict(name=x.upper(), ticker_id=x) for x in res]
         return res
 
     @ControllerBase.handler()
@@ -232,8 +240,11 @@ class Controller(ControllerBase):
         res["float_price"] = True
         res["float_volume"] = True
         res["ticker_id"] = ticker_id
-        return res
-                
+        return [res]
+
+    @ControllerBase.handler()
+    async def get_ticker_fields(self, ident, msg):
+        return TICKER_FIELDS
 
     @ControllerBase.handler()
     async def subscribe(self, ident, msg):
