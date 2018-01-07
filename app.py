@@ -18,6 +18,8 @@ from inspect import isfunction
 from pprint import pprint, pformat
 from time import time, gmtime
 from datetime import datetime
+from zmapi.zmq.utils import *
+from zmapi.connector.controller import ControllerBase
 
 ################################## CONSTANTS ##################################
 
@@ -53,116 +55,10 @@ L = None
 
 ###############################################################################
 
-def split_message(msg_parts):
-    separator_idx = None
-    for i, part in enumerate(msg_parts):
-        if not part:
-            separator_idx = i
-            break
-    if not separator_idx:
-        raise ValueError("ident separator not found")
-    ident = msg_parts[:separator_idx]
-    msg = msg_parts[separator_idx+1]
-    return ident, msg
-
-def ident_to_str(ident):
-    return "/".join([x.decode("latin-1").replace("/", "\/") for x in ident])
-
-def get_last_ep(sock):
-    return sock.getsockopt_string(zmq.LAST_ENDPOINT)
-
-###############################################################################
-
-class CodecException(Exception):
-    pass
-
-class DecodingException(Exception):
-    pass
-
-class InvalidArguments(Exception):
-    pass
-
-class CommandNotImplemented(Exception):
-    pass
-
-class ControllerBase:
-
-    _commands = {}
-
-    def __init__(self, ctx, addr):
-        self._sock = ctx.socket(zmq.ROUTER)
-        self._sock.bind(addr)
-
-    async def _send_error(self, ident, msg_id, ecode, msg=None):
-        msg = error.gen_error(ecode, msg)
-        msg["msg_id"] = msg_id
-        await self._send_reply(ident, msg)
-
-    async def _send_result(self, ident, msg_id, content):
-        msg = dict(msg_id=msg_id, content=content, result="ok")
-        await self._send_reply(ident, msg)
-       
-    async def _send_reply(self, ident, res):
-        msg = " " + json.dumps(res)
-        msg = msg.encode()
-        await self._sock.send_multipart(ident + [b"", msg])
-
-    async def run(self):
-        while True:
-            msg_parts = await self._sock.recv_multipart()
-            # pprint(msg_parts)
-            try:
-                ident, msg = split_message(msg_parts)
-            except ValueError as err:
-                L.error(str(err))
-                continue
-            if len(msg) == 0:
-                # handle ping message
-                await self._sock.send_multipart(msg_parts)
-                continue
-            create_task(self._handle_one_1(ident, msg))
-
-    async def _handle_one_1(self, ident, msg):
-        try:
-            msg = json.loads(msg.decode())
-            msg_id = msg.get("msg_id")
-            res = await self._handle_one_2(ident, msg)
-        except InvalidArguments as e:
-            L.exception("invalid arguments on message:")
-            await self._send_error(ident, msg_id, error.ARGS, str(e))
-        except CommandNotImplemented as e:
-            L.exception("command not implemented:")
-            await self._send_error(ident, msg_id, error.NOTIMPL, str(e))
-        except Exception as e:
-            L.exception("general exception handling message:", str(e))
-            await self._send_error(ident, msg_id, error.GENERIC, str(e))
-        else:
-            if res is not None:
-                await self._send_result(ident, msg_id, res)
-
-
-    async def _handle_one_2(self, ident, msg):
-        cmd = msg["command"]
-        L.debug("{}: {}".format(ident_to_str(ident), cmd))
-        f = self._commands.get(cmd)
-        if not f:
-            raise CommandNotImplemented(cmd)
-        return await f(self, ident, msg)
-
-    @staticmethod
-    def handler(cmd=None):
-        def decorator(f):
-            nonlocal cmd
-            if not cmd:
-                cmd = f.__name__
-            ControllerBase._commands[cmd] = f
-            return f
-        return decorator
-
 class Controller(ControllerBase):
 
     def __init__(self, ctx, addr):
-        super().__init__(ctx, addr)
+        super().__init__("MD", ctx, addr)
         self._cache = {}
 
     async def _fetch_cached(self, url, **kwargs):
