@@ -20,6 +20,7 @@ from time import time, gmtime
 from datetime import datetime
 from zmapi.zmq.utils import *
 from zmapi.connector.controller import ControllerBase
+from collections import defaultdict
 
 ################################## CONSTANTS ##################################
 
@@ -145,8 +146,22 @@ class Controller(ControllerBase):
 
     @ControllerBase.handler()
     async def subscribe(self, ident, msg):
-        await g.pub.subscribe(msg)
-        return {}
+        content = msg["content"]
+        ticker_id = content["ticker_id"]
+        ob_levels = content["order_book_levels"]
+        ob_speed = content["order_book_speed"]
+        trades_speed = content["trades_speed"]
+        res = {}
+        if trades_speed > 0:
+            res["trades"] = await g.pub.subscribe_trades(ticker_id)
+        else:
+            res["trades"] = await g.pub.unsubscribe_trades(ticker_id)
+        if ob_levels > 0 and ob_speed > 0:
+            res["order_book"] = await g.pub.subscribe_order_book(ticker_id,
+                                                                 ob_levels)
+        else:
+            res["order_book"] = await g.pub.unsubscribe_order_book(ticker_id)
+        return res
 
     @ControllerBase.handler()
     async def get_publisher(self, ident, msg):
@@ -223,6 +238,10 @@ class Controller(ControllerBase):
 ###############################################################################
 
 class Publisher:
+
+    @staticmethod
+    def create_subscription_definition():
+        return dict(trades=False, ob=False)
     
     def __init__(self, ctx, addr):
         self._ctx = ctx
@@ -235,8 +254,7 @@ class Publisher:
         self._pusher.always_call.append(self._data_received)
         self._pusher.error_handlers.append(self._error_received)
         self._channel_to_tid = {}
-        self._internal_pub = ctx.socket(zmq.PUB)
-        self._internal_pub.bind("inproc://pusher_internal")
+        self._subscriptions = defaultdict(self.create_subscription_definition)
 
     async def _error_received(self, err):
         L.warning("{}: {}".format(type(err).__name__, err))
@@ -248,10 +266,6 @@ class Publisher:
             return
         data = msg["data"]
         event = msg["event"]
-        # not required at the moment ...
-        # if event.startswith("pusher_internal"):
-        #     await self._internal_pub.send_string(json.dumps(msg))
-        #     return
         if not data:
             return
         if channel.startswith("live_trades"):
@@ -270,28 +284,14 @@ class Publisher:
 
     async def _handle_order_book(self, ticker_id, data):
         timestamp = float(data["timestamp"])
-        asks = [[float(price), float(size)] for price, size in data["asks"]]
-        bids = [[float(price), float(size)] for price, size in data["bids"]]
+        asks = [{"price": float(price), "size": float(size)}
+                for price, size in data["asks"]]
+        bids = [{"price": float(price), "size": float(size)}
+                for price, size in data["bids"]]
         data = dict(timestamp=timestamp, bids=bids, asks=asks)
         data = " " + json.dumps(data)
         data = [ticker_id.encode() + b"\x01", data.encode()]
         await self._sock.send_multipart(data)
-        # timestamp = float(data["timestamp"])
-        # levels = {price_str: float(size) for price_str, size in data["bids"]}
-        # for price_str, size in data["asks"]:
-        #     size = float(size)
-        #     old_size = levels.get(price_str, 0)
-        #     if old_size == 0:
-        #         levels[price_str] = -size
-        # l = [[float(price_str), levels[price_str]]
-        #      for price_str in sorted(levels)]
-        # data = dict(timestamp=timestamp, order_book=l)
-        # data = " " + json.dumps(data)
-        # data = [ticker_id.encode() + b"\x01", data.encode()]
-        # await self._sock.send_multipart(data)
-
-    #async def _error_received(self, err):
-    #    traceback.print_exception(type(err), err, err.__traceback__)
 
     async def run(self):
         L.info("connecting to pusher ...")
@@ -305,69 +305,55 @@ class Publisher:
             return ""
         return "_{}".format(ticker_id)
 
-    async def _subscribe_trades(self, ticker_id):
+    async def subscribe_trades(self, ticker_id):
+        sub_def = self._subscriptions[ticker_id]
+        if sub_def["trades"]:
+            return "no change"
         channel = "live_trades{}".format(self.tid_to_postfix(ticker_id))
         self._channel_to_tid[channel] = ticker_id
         await self._pusher.subscribe(channel)
         # pusher_internal:subscription_succeeded fires even when
         # the channel does not even exist. Not useful to wait for this
         # confirmation.
+        sub_def["trades"] = True
+        return "subscribed"
 
-        # sock = self._ctx.socket(zmq.SUB)
-        # sock.connect("inproc://pusher_internal")
-        # sock.subscribe(b"")
-        # tic = time()
-        # while True:
-        #     print("trying")
-        #     await asyncio.sleep(0.1)
-        #     try:
-        #         data = await sock.recv_string(zmq.NOBLOCK)
-        #     except zmq.error.Again:
-        #         print("again")
-        #         pass
-        #     else:
-        #         data = json.loads(data)
-        #         evt_ok = "pusher_internal:subscription_succeeded"
-        #         if data["channel"] == channel and data["event"] == evt_ok:
-        #             L.info("subscribed to trades on {}".format(ticker_id))
-        #             break
-        #     toc = time() - tic
-        #     if toc > 5:
-        #         raise Exception("timed out when subscribing to trades on {}"
-        #                         .format(ticker_id))
-
-    async def _unsubscribe_trades(self, ticker_id):
+    async def unsubscribe_trades(self, ticker_id):
+        sub_def = self._subscriptions[ticker_id]
+        if not sub_def["trades"]:
+            return "no change"
         channel = "live_trades{}".format(self.tid_to_postfix(ticker_id))
         await self._pusher.unsubscribe(channel)
         data = [ticker_id.encode() + b"\x02", b""]
         await self._sock.send_multipart(data)
+        sub_def["trades"] = False
+        return "unsubscribed"
 
-    async def _subscribe_order_book(self, ticker_id, levels):
+    async def subscribe_order_book(self, ticker_id, levels):
+        sub_def = self._subscriptions[ticker_id]
+        if sub_def["ob"]:
+            return "no change"
         channel = "diff_order_book{}".format(self.tid_to_postfix(ticker_id))
         self._channel_to_tid[channel] = ticker_id
+        # pusher_internal:subscription_succeeded fires even when
+        # the channel does not even exist. Not useful to wait for this
+        # confirmation.
         await self._pusher.subscribe(channel)
+        sub_def["ob"] = True
+        return "subscribed"
 
-    async def _unsubscribe_order_book(self, ticker_id):
+    async def unsubscribe_order_book(self, ticker_id):
+        sub_def = self._subscriptions[ticker_id]
+        if not sub_def["ob"]:
+            return "no change"
         channel = "diff_order_book{}".format(self.tid_to_postfix(ticker_id))
         await self._pusher.unsubscribe(channel)
         data = [ticker_id.encode() + b"\x01", b""]
         await self._sock.send_multipart(data)
+        sub_def["ob"] = False
+        return "unsubscribed"
 
 
-    async def subscribe(self, msg):
-        content = msg["content"]
-        ticker_id = content["ticker_id"]
-        order_book_levels = content.get("order_book_levels", 0)
-        order_book_speed = content.get("order_book_speed", 10)
-        trades_speed = content.get("trades_speed", 10)
-        if trades_speed > 0:
-            await self._subscribe_trades(ticker_id)
-        else:
-            await self._unsubscribe_trades(ticker_id)
-        if order_book_levels > 0 and order_book_speed > 0:
-            await self._subscribe_order_book(ticker_id, order_book_levels)
-        else:
-            await self._unsubscribe_order_book(ticker_id)
 
 
 ###############################################################################
