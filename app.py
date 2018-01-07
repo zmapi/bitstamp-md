@@ -23,6 +23,7 @@ from datetime import datetime
 
 CAPABILITIES = sorted([
     "GET_SNAPSHOT",
+    "GET_TICKER_FIELDS",
     "GET_TICKER_INFO_PRICE_TICK_SIZE",
     "SUBSCRIBE",
     "LIST_DIRECTORY",
