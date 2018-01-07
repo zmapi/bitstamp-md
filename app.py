@@ -20,6 +20,7 @@ from time import time, gmtime
 from datetime import datetime
 from zmapi.zmq.utils import *
 from zmapi.connector.controller import ControllerBase
+from zmapi.logging import setup_root_logger, disable_logger
 from collections import defaultdict
 
 ################################## CONSTANTS ##################################
@@ -52,7 +53,7 @@ g.startup_time = datetime.utcnow()
 g.status = "ok"
 
 # placeholder for Logger
-L = None
+L = logging.root
 
 ###############################################################################
 
@@ -358,27 +359,13 @@ class Publisher:
 
 ###############################################################################
 
-
-def build_logger(args):
-    logging.root.setLevel(args.log_level)
-    logger = logging.getLogger(__name__)
-    logger.propagate = False
-    logger.handlers.clear()
-    fmt = "%(asctime)s.%(msecs)03d [%(levelname)s] %(message)s"
-    datefmt = "%H:%M:%S"
-    formatter = logging.Formatter(fmt=fmt, datefmt=datefmt)
-    # convert datetime to utc
-    formatter.converter = gmtime
-    handler = logging.StreamHandler(stream=sys.stdout)
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
-    return logger
-
 def parse_args():
     parser = argparse.ArgumentParser(description="bitstamp md connector")
     parser.add_argument("ctl_addr", help="address to bind to for ctl socket")
     parser.add_argument("pub_addr", help="address to bind to for pub socket")
     parser.add_argument("--log-level", default="INFO", help="logging level")
+    parser.add_argument("--log-websockets", action="store_true",
+                        help="add websockets logger")
     args = parser.parse_args()
     try:
         args.log_level = int(args.log_level)
@@ -386,10 +373,14 @@ def parse_args():
         pass
     return args
 
+def setup_logging(args):
+    if not args.log_websockets:
+        disable_logger("websockets")
+    setup_root_logger(args.log_level)
+
 def main():
-    global L
     args = parse_args()
-    L = build_logger(args)
+    setup_logging(args)
     g.ctl = Controller(g.ctx, args.ctl_addr)
     g.pub = Publisher(g.ctx, args.pub_addr)
     L.debug("starting event loop ...")
