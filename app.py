@@ -152,6 +152,7 @@ class Controller(ControllerBase):
         ob_levels = content["order_book_levels"]
         ob_speed = content["order_book_speed"]
         trades_speed = content["trades_speed"]
+        # no special handling for emit_quotes, bitstamp doesn't support it
         res = {}
         if trades_speed > 0:
             res["trades"] = await g.pub.subscribe_trades(ticker_id)
