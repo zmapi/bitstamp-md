@@ -152,15 +152,14 @@ class Controller(ControllerBase):
         ob_levels = content["order_book_levels"]
         ob_speed = content["order_book_speed"]
         trades_speed = content["trades_speed"]
-        # no special handling for emit_quotes, bitstamp doesn't support it
+        emit_quotes = content["emit_quotes"]
         res = {}
         if trades_speed > 0:
             res["trades"] = await g.pub.subscribe_trades(ticker_id)
         else:
             res["trades"] = await g.pub.unsubscribe_trades(ticker_id)
-        if ob_levels > 0 and ob_speed > 0:
-            res["order_book"] = await g.pub.subscribe_order_book(ticker_id,
-                                                                 ob_levels)
+        if (ob_levels > 0 and ob_speed > 0) or emit_quotes:
+            res["order_book"] = await g.pub.subscribe_order_book(ticker_id)
         else:
             res["order_book"] = await g.pub.unsubscribe_order_book(ticker_id)
         return res
@@ -331,7 +330,7 @@ class Publisher:
         sub_def["trades"] = False
         return "unsubscribed"
 
-    async def subscribe_order_book(self, ticker_id, levels):
+    async def subscribe_order_book(self, ticker_id):
         sub_def = self._subscriptions[ticker_id]
         if sub_def["ob"]:
             return "no change"
