@@ -40,6 +40,10 @@ TICKER_FIELDS = [
      "description": "The symbol of the ticker"}
 ]
 
+MISC_DETAILS = {
+    "timestamp_granularity": 1,
+}
+
 MODULE_NAME = "bitstamp-md"
 
 ################################ GLOBAL STATE #################################
@@ -115,38 +119,43 @@ class Controller(ControllerBase):
 
     @ControllerBase.handler()
     async def get_ticker_info(self, ident, msg):
-        ticker = msg["content"]["ticker"]
-        if "ticker_id" in ticker:
-            ticker_id = ticker["ticker_id"]
-        else:
-            ticker_id = ticker["symbol"].lower()
+        content = msg["content"]
+        ticker = content.get("ticker")
+        ticker_id = ticker.get("ticker_id", ticker.get("symbol", "").lower())
         url = "https://www.bitstamp.net/api/v2/trading-pairs-info/"
         data = await self._fetch_cached(url)
         data = json.loads(data.decode())
-        sel = [x for x in data if x["url_symbol"] == ticker_id]
-        if not sel:
-            raise Exception("ticker not found")
-        assert len(sel) == 1, sel
-        d = sel[0]
-        res = {}
-        res["description"] = d["description"]
-        # is this strictly the same thing as tradable?
-        if d["trading"] == "Enabled":
-            res["tradable"] = True
-        else:
-            res["tradable"] = False
-        res["price_tick_size"] = 10 ** -d["counter_decimals"]
-        res["float_price"] = True
-        res["float_volume"] = True
-        res["ticker_id"] = ticker_id
-        return [res]
+        if ticker_id:
+            data = [x for x in data if x["url_symbol"] == ticker_id]
+            if not data:
+                raise Exception("ticker not found")
+            assert len(data) == 1, len(data)
+        res = []
+        for t in data:
+            d = {}
+            d["description"] = t["description"]
+            # is this strictly the same thing as tradable?
+            if t["trading"] == "Enabled":
+                d["tradable"] = True
+            else:
+                d["tradable"] = False
+            d["price_tick_size"] = 10 ** -t["counter_decimals"]
+            d["float_price"] = True
+            d["float_volume"] = True
+            d["ticker_id"] = t["url_symbol"]
+            res.append(d)
+        return res
 
     @ControllerBase.handler()
     async def get_ticker_fields(self, ident, msg):
         return TICKER_FIELDS
 
     @ControllerBase.handler()
-    async def subscribe(self, ident, msg):
+    async def get_misc_details(self, ident, msg):
+        return MISC_DETAILS
+
+    @ControllerBase.handler()
+    async def modify_subscription(self, ident, msg):
         content = msg["content"]
         ticker_id = content["ticker_id"]
         ob_levels = content["order_book_levels"]
@@ -181,6 +190,26 @@ class Controller(ControllerBase):
             raise NotImplementedError("transport not implemented")
         return res
 
+    async def get_order_book_snapshot(self, levels, ticker_id, session):
+        res = {}
+        url = "https://www.bitstamp.net/api/v2/order_book/{}/"
+        url = url.format(ticker_id)
+        async with session.get(url) as r:
+            if r.status < 200 or r.status >= 300:
+                raise Exception("GET order_book: {}".format(r.status))
+            data = await r.read()
+            data = json.loads(data.decode())
+            res["timestamp"] = float(data["timestamp"])
+            bids = [{"price": float(p), "size": float(s)}
+                    for p, s in data["bids"]]
+            bids = sorted(bids, key=lambda x: x["price"])[::-1][:levels]
+            res["bids"] = bids
+            asks = [{"price": float(p), "size": float(s)}
+                    for p, s in data["asks"]]
+            asks = sorted(asks, key=lambda x: x["price"])[:levels]
+            res["asks"] = asks
+        return res
+
     @ControllerBase.handler()
     async def get_snapshot(self, ident, msg):
         res = {}
@@ -209,26 +238,15 @@ class Controller(ControllerBase):
                     timestamp2 = ob_data.pop("timestamp")
                     res["timestamp"] = max(res["timestamp"], timestamp2)
                     res["order_book"] = ob_data
-        return res
-
-    async def get_order_book_snapshot(self, levels, ticker_id, session):
-        res = {}
-        url = "https://www.bitstamp.net/api/v2/order_book/{}/"
-        url = url.format(ticker_id)
-        async with session.get(url) as r:
-            if r.status < 200 or r.status >= 300:
-                raise Exception("GET order_book: {}".format(r.status))
-            data = await r.read()
-            data = json.loads(data.decode())
-            res["timestamp"] = float(data["timestamp"])
-            bids = [[float(p), float(s)] for p, s in data["bids"]]
-            bids = sorted(bids)[::-1]
-            bids = bids[:levels]
-            res["bids"] = bids
-            asks = [[float(p), float(s)] for p, s in data["asks"]]
-            asks = sorted(asks)
-            asks = asks[:levels]
-            res["asks"] = asks
+                    top_lvl = ob_data["bids"][0]
+                    # Get bbo data from order book to avoid problem with
+                    # data synchronization. This way it's possible to get size
+                    # data as well.
+                    res["bid_price"] = top_lvl["price"]
+                    res["bid_size"] = top_lvl["size"]
+                    top_lvl = ob_data["asks"][0]
+                    res["ask_price"] = top_lvl["price"]
+                    res["ask_size"] = top_lvl["size"]
         return res
 
     @ControllerBase.handler()
