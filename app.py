@@ -115,7 +115,7 @@ class Controller(ControllerBase):
         data = json.loads(data.decode())
         res = [x["url_symbol"] for x in data]
         res = sorted(res)
-        res = [dict(name=x.upper(), ticker_id=x) for x in res]
+        res = [dict(name=x, ticker_id=x) for x in res]
         return res
 
     @ControllerBase.handler()
