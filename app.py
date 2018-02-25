@@ -19,7 +19,7 @@ from pprint import pprint, pformat
 from time import time, gmtime
 from datetime import datetime
 from zmapi.zmq.utils import *
-from zmapi.connector.controller import ControllerBase
+from zmapi.connector.controller import RESTController, ControllerBase
 from zmapi.logging import setup_root_logger, disable_logger
 from collections import defaultdict
 
@@ -62,41 +62,15 @@ L = logging.root
 
 ###############################################################################
 
-class Controller(ControllerBase):
+class Controller(RESTController):
 
     def __init__(self, ctx, addr):
         super().__init__("MD", ctx, addr)
-        self._cache = {}
+        # max 600 requests in any rolling 10 minute period
+        self._add_throttler(r".*", 600, 10 * 60)
 
-    async def _fetch_cached(self, url, **kwargs):
-        session = kwargs.pop("session", None)
-        expiration_secs = kwargs.pop("expiration_secs", 86400)
-        holder = self._cache.get(url)
-        data = None
-        if holder is not None:
-            elapsed = time() - holder["timestamp"]
-            if elapsed < expiration_secs:
-                data = holder["data"]
-        if data is None:
-            timestamp = time()
-            data = await self._do_fetch(session, url)
-            holder = dict(data=data, timestamp=timestamp)
-            self._cache[url] = holder
-        return data
-
-    async def _do_fetch(self, session, url):
-        close_session = False
-        if session is None:
-            session = aiohttp.ClientSession()
-            close_session = True
-        data = None
-        async with session.get(url) as r:
-            if r.status < 200 or r.status >= 300:
-                raise Exception("GET {}: status {}".format(url, r.status))
-            data = await r.read()
-        if close_session:
-            session.close()
-        return data
+    def _process_fetched_data(self, data, url):
+        return json.loads(data.decode())
 
     @ControllerBase.handler()
     async def get_status(self, ident, msg):
@@ -111,8 +85,7 @@ class Controller(ControllerBase):
     @ControllerBase.handler()
     async def list_directory(self, ident, msg):
         url = "https://www.bitstamp.net/api/v2/trading-pairs-info/"
-        data = await self._fetch_cached(url)
-        data = json.loads(data.decode())
+        data = await self._http_get_cached(url, 86400)
         res = [x["url_symbol"] for x in data]
         res = sorted(res)
         res = [dict(name=x, ticker_id=x) for x in res]
@@ -124,8 +97,7 @@ class Controller(ControllerBase):
         ticker = content.get("ticker")
         ticker_id = ticker.get("ticker_id", ticker.get("symbol", "").lower())
         url = "https://www.bitstamp.net/api/v2/trading-pairs-info/"
-        data = await self._fetch_cached(url)
-        data = json.loads(data.decode())
+        data = await self._http_get_cached(url, 86400)
         if ticker_id:
             data = [x for x in data if x["url_symbol"] == ticker_id]
             if not data:
@@ -174,37 +146,20 @@ class Controller(ControllerBase):
             res["order_book"] = await g.pub.unsubscribe_order_book(ticker_id)
         return res
 
-    @ControllerBase.handler()
-    async def get_publisher(self, ident, msg):
-        ep = get_last_ep(g.pub._sock)
-        transport = ep[:ep.find(":")]
-        res = {}
-        res["transport"] = transport
-        if transport == "tcp":
-            res["port"] = int(ep.split(":")[-1])
-        elif transport == "ipc":
-            if ep[6] == "/":  #absolute path
-                res["path"] = ep[6:]
-            else:  # relative path
-                res["path"] = os.path.join(os.environ["PWD"], ep[6:])
-        else:
-            raise NotImplementedError("transport not implemented")
-        return res
-
     async def get_order_book_snapshot(self, levels, ticker_id, session):
         res = {}
         url = "https://www.bitstamp.net/api/v2/order_book/{}/"
         url = url.format(ticker_id)
-        async with session.get(url) as r:
-            if r.status < 200 or r.status >= 300:
-                raise Exception("GET order_book: {}".format(r.status))
-            data = await r.read()
-            data = json.loads(data.decode())
-            res["timestamp"] = float(data["timestamp"])
+        data = await self._http_get(url, session=session)
+        res["timestamp"] = float(data["timestamp"])
+        res["bids"] = []
+        if "bids" in data:
             bids = [{"price": float(p), "size": float(s)}
                     for p, s in data["bids"]]
             bids = sorted(bids, key=lambda x: x["price"])[::-1][:levels]
             res["bids"] = bids
+        res["asks"] = []
+        if "asks" in data:
             asks = [{"price": float(p), "size": float(s)}
                     for p, s in data["asks"]]
             asks = sorted(asks, key=lambda x: x["price"])[:levels]
@@ -218,36 +173,34 @@ class Controller(ControllerBase):
         ticker_id = content["ticker_id"]
         url = "https://www.bitstamp.net/api/v2/ticker/{}/".format(ticker_id)
         async with aiohttp.ClientSession() as session:
-            async with session.get(url) as r:
-                if r.status < 200 or r.status >= 300:
-                    raise Exception("GET ticker: {}".format(r.status))
-                data = await r.read()
-                data = json.loads(data.decode())
-                res["ask_price"] = float(data.pop("ask"))
-                res["bid_price"] = float(data.pop("bid"))
-                res["last_price"] = float(data.pop("last"))
-                res["timestamp"] = float(data.pop("timestamp"))
-                if content.get("daily_data"):
-                    res["daily"] = daily = {}
-                    daily.update({k: float(v) for k, v in data.items()})
-                order_book_levels = content.get("order_book_levels", 0)
-                if order_book_levels > 0:
-                    ob_data = await self.get_order_book_snapshot(
-                            order_book_levels,
-                            ticker_id,
-                            session)
-                    timestamp2 = ob_data.pop("timestamp")
-                    res["timestamp"] = max(res["timestamp"], timestamp2)
-                    res["order_book"] = ob_data
-                    top_lvl = ob_data["bids"][0]
-                    # Get bbo data from order book to avoid problem with
-                    # data synchronization. This way it's possible to get size
-                    # data as well.
-                    res["bid_price"] = top_lvl["price"]
-                    res["bid_size"] = top_lvl["size"]
-                    top_lvl = ob_data["asks"][0]
-                    res["ask_price"] = top_lvl["price"]
-                    res["ask_size"] = top_lvl["size"]
+            data = await self._http_get(url, session=session)
+            res["ask_price"] = float(data.pop("ask"))
+            res["bid_price"] = float(data.pop("bid"))
+            res["last_price"] = float(data.pop("last"))
+            res["timestamp"] = float(data.pop("timestamp"))
+            if content.get("daily_data"):
+                res["daily"] = daily = {}
+                daily.update({k: float(v) for k, v in data.items()})
+            order_book_levels = content.get("order_book_levels", 0)
+            if order_book_levels > 0:
+                ob_data = await self.get_order_book_snapshot(
+                        order_book_levels,
+                        ticker_id,
+                        session)
+                timestamp2 = ob_data.pop("timestamp")
+                res["timestamp"] = max(res["timestamp"], timestamp2)
+                res["order_book"] = ob_data
+                # Get bbo data from order book to avoid problem with
+                # data synchronization. This way it's possible to get size
+                # data as well.
+                if ob_data["bids"]:
+                    best_lvl = ob_data["bids"][0]
+                    res["bid_price"] = best_lvl["price"]
+                    res["bid_size"] = best_lvl["size"]
+                if ob_data["asks"]:
+                    best_lvl = ob_data["asks"][0]
+                    res["ask_price"] = best_lvl["price"]
+                    res["ask_size"] = best_lvl["size"]
         return res
 
     @ControllerBase.handler()
