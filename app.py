@@ -21,7 +21,7 @@ from pprint import pprint, pformat
 from time import time, gmtime
 from datetime import datetime
 from zmapi.zmq.utils import *
-from zmapi.utils import random_str, delayed
+from zmapi.utils import random_str, delayed, get_timestamp
 from zmapi.controller import RESTConnectorCTL, ConnectorCTL
 from zmapi.logging import setup_root_logger, disable_logger
 from collections import defaultdict
@@ -41,10 +41,10 @@ CAPABILITIES = sorted([
 
 
 TICKER_FIELDS = [
-    {"field": "symbol",
-     "type": "str",
-     "label": "Symbol",
-     "description": "The symbol of the ticker"}
+#    {"field": "symbol",
+#     "type": "str",
+#     "label": "Symbol",
+#     "description": "The symbol of the ticker"}
 ]
 
 
@@ -83,7 +83,7 @@ class MyController(RESTConnectorCTL):
 
 
     def __init__(self, sock_dn, ctx):
-        super().__init__(sock_dn, ctx, name="MD")
+        super().__init__(sock_dn, ctx)
         # max 600 requests in any rolling 10 minute period
         self._add_throttler(r".*", 600, 10 * 60)
 
@@ -107,22 +107,36 @@ class MyController(RESTConnectorCTL):
     async def ZMListDirectory(self, ident, msg_raw, msg):
         url = "https://www.bitstamp.net/api/v2/trading-pairs-info/"
         data = await self._http_get_cached(url, 86400)
-        data = [x["url_symbol"] for x in data]
-        data = sorted(data)
+        data = sorted(data, key=lambda x: x["url_symbol"])
         res = {}
         res["Header"] = header = {}
         header["MsgType"] = fix.MsgType.ZMListDirectoryResponse
         res["Body"] = body = {}
-        body["ZMDirEntries"] = [dict(ZMNodeName=x, ZMInstrumentID=x, Text=x)
-                                for x in data]
+        group = []
+        for x in data:
+            d = {}
+            d["ZMNodeName"] = x["url_symbol"]
+            d["ZMInstrumentID"] = x["url_symbol"]
+            d["Text"] = x["description"]
+            group.append(d)
+        body["ZMDirEntries"] = group
         return res
+
+
+        # data = [x["url_symbol"] for x in data]
+        # data = sorted(data)
+        # res = {}
+        # res["Header"] = header = {}
+        # header["MsgType"] = fix.MsgType.ZMListDirectoryResponse
+        # res["Body"] = body = {}
+        # body["ZMDirEntries"] = [dict(ZMNodeName=x, ZMInstrumentID=x, Text=x)
+        #                         for x in data]
+        # return res
 
 
     async def SecurityListRequest(self, ident, msg_raw, msg):
         body = msg["Body"]
         instrument_id = body.get("ZMInstrumentID")
-        if not instrument_id:
-            instrument_id = body["Instrument"]["Symbol"].lower()
         res = {}
         res["Header"] = header = {}
         header["MsgType"] = fix.MsgType.SecurityList
@@ -141,7 +155,7 @@ class MyController(RESTConnectorCTL):
             d = {}
             d["SecurityDesc"] = t["description"]
             d["MinPriceIncrement"] = 10 ** -t["counter_decimals"]
-            d["ZMInstrumentID"] = d["Symbol"] = t["url_symbol"]
+            d["ZMInstrumentID"] = t["url_symbol"]
             group.append(d)
         return res
 
@@ -397,14 +411,33 @@ class Publisher:
         for ins_id, d in self._subscriptions.items():
             L.debug("pusher resubscribing to {} ...".format(ins_id))
             if d["trades"]:
+                d["trades"] = False
                 await self.subscribe_trades(ins_id)
             if d["ob"]:
+                d["ob"] = False
                 await self.subscribe_order_book(ins_id)
+
+
+    async def _send_disconnected(self):
+        seq_no = g.seq_no
+        g.seq_no += 1
+        msg = {}
+        msg["Header"] = header = {}
+        header["ZMSendingTime"] = get_timestamp()
+        header["MsgSeqNum"] = seq_no
+        msg["Body"] = body = {}
+        body["UserStatus"] = fix.UserStatus.Disconnected
+        msg_bytes = (" " + json.dumps(msg)).encode()
+        await self._sock.send_multipart([
+            fix.MsgType.UserNotification.encode(),
+            msg_bytes
+        ])
 
     
     async def _restart(self):
         if self._pusher:
             await self._pusher.close()
+        await self._send_disconnected()
         self._pusher = aiopusher.Client("de504dc5763aeef9ff52", secure=True)
         self._pusher.always_call.append(self._data_received)
         self._pusher.error_handlers.append(self._error_received)
