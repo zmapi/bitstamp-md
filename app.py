@@ -32,13 +32,12 @@ from uuid import uuid4
 
 
 CAPABILITIES = sorted([
-    "UNSYNC_SNAPSHOT",
-    "GET_TICKER_FIELDS",
-    "SUBSCRIBE",
-    "LIST_DIRECTORY",
-    "PUB_ORDER_BOOK_INCREMENTAL",
+    fix.ZMCap.UnsyncMDSnapshot,
+    fix.ZMCap.GetTickerFields,
+    fix.ZMCap.MDSubscribe,
+    fix.ZMCap.ListDirectory,
+    fix.ZMCap.PubOrderBookIncremental,
 ])
-
 
 TICKER_FIELDS = [
 #    {"field": "symbol",
@@ -119,7 +118,7 @@ class MyController(RESTConnectorCTL):
             d["ZMInstrumentID"] = x["url_symbol"]
             d["Text"] = x["description"]
             group.append(d)
-        body["ZMDirEntries"] = group
+        body["ZMNoDirEntries"] = group
         return res
 
 
@@ -141,10 +140,11 @@ class MyController(RESTConnectorCTL):
         res["Header"] = header = {}
         header["MsgType"] = fix.MsgType.SecurityList
         res["Body"] = body = {}
-        body["SecListGrp"] = group = []
+        body["NoRelatedSym"] = group = []
         url = "https://www.bitstamp.net/api/v2/trading-pairs-info/"
         data = await self._http_get_cached(url, 86400)
         if instrument_id:
+            print(instrument_id)
             data = [x for x in data if x["url_symbol"] == instrument_id]
             assert len(data) == 1, len(data)
             if not data:
@@ -177,8 +177,8 @@ class MyController(RESTConnectorCTL):
         
         res = {}
 
-        res["MDFullGrp"] = group = []
-        ticks = sub_def["MDReqGrp"]
+        res["ZMNoMDFullEntries"] = group = []
+        ticks = sub_def["NoMDEntryTypes"]
         market_depth = sub_def.get("MarketDepth", 0)
 
         get_ob = True
@@ -293,7 +293,7 @@ class MyController(RESTConnectorCTL):
             raise MarketDataRequestRejectException(
                     fix.UnsupportedSubscriptionRequestType, srt)
         ins_id = body["ZMInstrumentID"]
-        ticks = body.get("MDReqGrp")
+        ticks = body.get("NoMDEntryTypes")
         res = {}
         res["Header"] = header = {}
         header["MsgType"] = fix.MsgType.ZMMarketDataRequestResponse
@@ -381,7 +381,7 @@ class MyController(RESTConnectorCTL):
         res["Header"] = header = {}
         header["MsgType"] = fix.MsgType.ZMListCapabilitiesResponse
         res["Body"] = body = {}
-        body["ZMCaps"] = CAPABILITIES
+        body["ZMNoCaps"] = CAPABILITIES
         return res
 
 
@@ -516,7 +516,7 @@ class Publisher:
         header["ZMSendingTime"] = int(datetime.utcnow().timestamp() * 1e9)
 
         d["Body"] = body = {}
-        body["MDIncGrp"] = group = []
+        body["ZMNoMDIncEntries"] = group = []
 
         for price, size in data["bids"]:
             c = {}
